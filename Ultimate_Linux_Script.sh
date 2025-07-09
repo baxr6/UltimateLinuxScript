@@ -4,20 +4,24 @@ set -euo pipefail
 trap "echo 'Script interrupted'; exit 1" INT TERM
 
 ### Backup CONFIG START ###
-SERVERBACKUPFOLDER="/media/deano/HDD1/Backup"
+SERVERBACKUPFOLDER="/media/deano/HDD/Backup"
+PCLOUDBACKUPFOLDER="/home/deano/pCloudDrive"
 TMPFOLDER="/tmp"
 NUMTOKEEP=5
-EXCLUDE=("/lost+found" "/media" "/mnt" "/proc" "/sys" "/storage" "/virtual")
+EXCLUDE=("/lost+found" "/media" "/mnt" "/proc" "/sys" "/storage" "/virtual" "/home/deano/pCloudDrive")
+services=("tor" "privoxy" "squid")
 ### Backup CONFIG END ###
 
 if ! command -v whiptail &> /dev/null; then
   sudo apt install -y whiptail
 fi
 
+# --- Info ---
 function info() {
   whiptail --title "Info" --msgbox "$1" 10 60
 }
 
+# --- Requirements Check ---
 function check_requirements() {
   local reqs=(tar rsync sha256sum find whiptail df gsettings)
   for cmd in "${reqs[@]}"; do
@@ -28,27 +32,33 @@ function check_requirements() {
   done
 }
 
-function check_backup_mount() {
-  local PARENTMOUNT
-  PARENTMOUNT=$(dirname "$SERVERBACKUPFOLDER")
-  if ! mountpoint -q "$PARENTMOUNT"; then
-    info "Parent drive is not mounted. Expected mount at: $PARENTMOUNT"
+# --- Backup Mount Checks ---
+function p_check_backup_mount() {
+  local MOUNTPOINT="$PCLOUDBACKUPFOLDER"
+  if ! pgrep -x pcloud > /dev/null; then
+    info "pCloud client is not running. Please start pCloud."
     return 1
   fi
-  if [[ ! -d "$SERVERBACKUPFOLDER" ]]; then
-    mkdir -p "$SERVERBACKUPFOLDER" || {
-      info "Failed to create backup folder at $SERVERBACKUPFOLDER"
-      return 1
-    }
-  fi
-  if [[ ! -w "$SERVERBACKUPFOLDER" ]]; then
-    info "Backup folder exists but is not writable: $SERVERBACKUPFOLDER"
+  if [[ ! -d "$MOUNTPOINT" || ! -r "$MOUNTPOINT" || -z "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+    info "pCloudDrive not mounted, inaccessible, or empty: $MOUNTPOINT"
     return 1
   fi
+  mkdir -p "$MOUNTPOINT/full" "$MOUNTPOINT/incremental"
+  [[ ! -w "$MOUNTPOINT" ]] && info "Backup folder not writable: $MOUNTPOINT" && return 1
 }
 
+function check_backup_mount() {
+  local MOUNTPOINT="$SERVERBACKUPFOLDER"
+  if [[ ! -d "$MOUNTPOINT" || ! -r "$MOUNTPOINT" || -z "$(ls -A "$MOUNTPOINT" 2>/dev/null)" ]]; then
+    info "Drive not mounted, inaccessible, or empty: $MOUNTPOINT"
+    return 1
+  fi
+  mkdir -p "$MOUNTPOINT/full" "$MOUNTPOINT/incremental"
+  [[ ! -w "$MOUNTPOINT" ]] && info "Backup folder not writable: $MOUNTPOINT" && return 1
+}
+
+# --- Utility ---
 function system_check() {
-  echo "Running system health checks..."
   df -h /
   sudo apt -f install --dry-run
   systemctl --failed
@@ -57,19 +67,18 @@ function system_check() {
 
 function update_upgrade() {
   sudo apt update && sudo apt full-upgrade -y
-  info "System updated successfully."
+  info "System updated."
 }
 
 function install_essentials() {
-  info "Installing curl git vim gnome-tweaks build-essential unzip htop."
   sudo apt install -y curl git vim gnome-tweaks build-essential unzip htop
-  info "Essential packages installed."
+  info "Essentials installed."
 }
 
 function install_dev_tools() {
   sudo apt install -y python3-pip nodejs npm docker.io docker-compose
   sudo usermod -aG docker "$USER"
-  info "Developer tools installed. Docker group added (reboot may be needed)."
+  info "Developer tools installed. Docker group set."
 }
 
 function configure_ufw() {
@@ -77,29 +86,50 @@ function configure_ufw() {
   sudo ufw enable
   sudo ufw default deny incoming
   sudo ufw default allow outgoing
-  info "UFW configured with default deny/allow."
+  info "UFW configured."
 }
 
 function setup_flatpak() {
   sudo apt install -y flatpak gnome-software-plugin-flatpak
   flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-  info "Flatpak and Flathub installed."
+  info "Flatpak installed."
 }
 
 function gnome_tweaks() {
   gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark'
   gsettings set org.gnome.desktop.interface enable-animations false
-  info "GNOME tweaks applied (dark theme, no animations)."
+  info "GNOME tweaks applied."
 }
 
 function clean_system() {
   sudo apt autoremove -y
   sudo apt clean
   sudo journalctl --vacuum-time=7d
-  info "System cleaned up."
+  info "System cleaned."
 }
 
-function rmOld {
+function start_mask_ip() {
+  for service in "${services[@]}"; do
+    sudo systemctl start "$service"
+  done
+  info "All services started."
+}
+
+function stop_mask_ip() {
+  for service in "${services[@]}"; do
+    sudo systemctl stop "$service"
+  done
+  info "All services stopped."
+}
+
+function status_mask_ip() {
+  for service in "${services[@]}"; do
+    sudo systemctl status "$service" --no-pager --lines=1
+  done
+  info "Service statuses checked."
+}
+
+function rmOld() {
   local DIR="$1"
   local KEEP="$2"
   cd "$DIR" || return 1
@@ -107,22 +137,63 @@ function rmOld {
   local DCOUNT=${#DLIST[@]}
   if (( DCOUNT > KEEP )); then
     for (( i=KEEP; i<DCOUNT; i++ )); do
-      if [[ -d "${DLIST[i]}" && "${DLIST[i]}" != "" ]]; then
-        echo "Removing ${DLIST[i]}"
-        rm -rf -- "${DLIST[i]}"
-      fi
+      [[ -d "${DLIST[i]}" ]] && rm -rf -- "${DLIST[i]}"
     done
   fi
 }
 
 function verify_backup() {
   local target="$1"
-  echo "Verifying backup in: $target"
   cd "$target"
   find . -name '*.tar.bz2' -exec sha256sum {} \; > SHA256SUMS.txt
-  sha256sum -c SHA256SUMS.txt > verify.log
-  info "Backup verification completed. Check verify.log for details."
+  sha256sum -c SHA256SUMS.txt > verify.log 2>&1
+  if grep -q 'FAILED' verify.log; then
+    info "Backup verification FAILED. Check verify.log."
+  else
+    info "Backup verified successfully."
+  fi
 }
+
+function pBackup {
+  check_requirements
+  system_check
+  p_check_backup_mount || return 1
+
+  local LOGFILE="${PCLOUDBACKUPFOLDER}/full/backup-$(date +%Y%m%d_%H%M%S).log"
+  echo "Starting full backup of /home/deano..." | tee -a "$LOGFILE"
+  df -h "$PCLOUDBACKUPFOLDER" | tee -a "$LOGFILE"
+  local START=$(date)
+  echo "Start: $START" | tee -a "$LOGFILE"
+
+  # Setup folders
+  mkdir -p "$PCLOUDBACKUPFOLDER/full"
+  mkdir -p "$PCLOUDBACKUPFOLDER/incremental"
+  touch "$PCLOUDBACKUPFOLDER/incremental/lastran.txt"
+
+  local BDIR=$(date +"%Y%m%d_%H%M")
+  local TARGETDIR="$PCLOUDBACKUPFOLDER/full/$BDIR"
+  mkdir -p "$TARGETDIR"
+  echo "Restore with: tar -xjf deano.tar.bz2 -C /" > "$TARGETDIR/restore.txt"
+
+  echo "Tarring /home/deano..." | tee -a "$LOGFILE"
+  tar --ignore-failed-read --warning=no-file-changed \
+      -cjf "$TARGETDIR/deano.tar.bz2" /home/deano \
+      || echo "Failed to tar /home/deano" | tee -a "$LOGFILE"
+
+  # Check size
+  local DSIZE=$(du -sm "$TARGETDIR" | awk '{print $1}')
+  if [[ "$DSIZE" -gt 1000 ]]; then
+    : "${NUMTOKEEP:=3}"  # Default value
+    rmOld "$PCLOUDBACKUPFOLDER/full" "$NUMTOKEEP"
+    echo "Clearing incremental backups..." | tee -a "$LOGFILE"
+    rm -rf "$PCLOUDBACKUPFOLDER/incremental/"*
+  else
+    echo "Backup size < 1GB – check for issues!" | tee -a "$LOGFILE"
+  fi
+
+  verify_backup "$TARGETDIR"
+}
+
 
 function fullBackup {
   check_requirements
@@ -302,42 +373,97 @@ function cleanup() {
     echo "No logs to clear."
   fi
 }
-
-# Menu loop
-while true; do
-  OPTION=$(whiptail --title "Deano's Ubuntu 24.04 Setup Menu" --menu "Choose an option:" 20 70 12 \
+# --- Submenus ---
+function setup_menu() {
+  local OPTION=$(whiptail --title "System Setup" --menu "Choose a setup task:" 20 70 10 \
     "1" "Update & Upgrade System" \
     "2" "Install Essential Packages" \
     "3" "Install Developer Tools" \
-    "4" "Configure Firewall (UFW)" \
-    "5" "Setup Flatpak + Flathub" \
-    "6" "Apply GNOME Tweaks" \
-    "7" "Full Backup" \
-    "8" "Incremental Backup (tar)" \
-    "9" "Clean Backup Log Files" \
-    "10" "Clean System" \
-    "11" "Verify Last Full Backup" \
-    "12" "Restore System Backup" \
-    "13" "Rsync Incremental Snapshot" \
-    "14" "Exit" \
+    "4" "Setup Flatpak + Flathub" \
+    "5" "Apply GNOME Tweaks" \
+    "6" "Back to Main Menu" \
     3>&1 1>&2 2>&3)
-
   case "$OPTION" in
     1) update_upgrade ;;
     2) install_essentials ;;
     3) install_dev_tools ;;
-    4) configure_ufw ;;
-    5) setup_flatpak ;;
-    6) gnome_tweaks ;;
-    7) fullBackup ;;
-    8) incrementalBackup ;;
-    9) cleanup ;;
-    10) clean_system ;;
-    11) verify_backup "$SERVERBACKUPFOLDER/full/$(ls "$SERVERBACKUPFOLDER/full" | sort | tail -n 1)" ;;
-    12) restore_backup ;;
-    13) rsyncIncremental ;;
-    14) clear; exit ;;
-    *) info "Invalid option." ;;
+    4) setup_flatpak ;;
+    5) gnome_tweaks ;;
+    6) return ;;
   esac
-done
+}
 
+function backup_menu() {
+  local OPTION=$(whiptail --title "Backup Options" --menu "Choose a backup method:" 20 70 10 \
+    "1" "Full Backup (Local)" \
+    "2" "pCloud Full Backup" \
+    "3" "Incremental Backup (tar)" \
+    "4" "Rsync Snapshot Backup" \
+    "5" "Verify Last Full Backup" \
+    "6" "Back to Main Menu" \
+    3>&1 1>&2 2>&3)
+  case "$OPTION" in
+    1) fullBackup ;;
+    2) pBackup ;;
+    3) incrementalBackup ;;
+    4) rsyncIncremental ;;
+    5) verify_backup "$SERVERBACKUPFOLDER/full/$(ls "$SERVERBACKUPFOLDER/full" | sort | tail -n 1)" ;;
+    6) return ;;
+  esac
+}
+
+function security_menu() {
+  local OPTION=$(whiptail --title "Security & Privacy" --menu "Manage network privacy:" 15 60 8 \
+    "1" "Start Mask IP (tor/privoxy/squid)" \
+    "2" "Stop Mask IP" \
+    "3" "Status of Services" \
+    "4" "Configure Firewall (UFW)" \
+    "5" "Back to Main Menu" \
+    3>&1 1>&2 2>&3)
+  case "$OPTION" in
+    1) start_mask_ip ;;
+    2) stop_mask_ip ;;
+    3) status_mask_ip ;;
+    4) configure_ufw ;;
+    5) return ;;
+  esac
+}
+
+function maintenance_menu() {
+  local OPTION=$(whiptail --title "Maintenance" --menu "System and backup maintenance:" 15 60 8 \
+    "1" "Clean Backup Log Files" \
+    "2" "Clean System (autoremove, logs)" \
+    "3" "Back to Main Menu" \
+    3>&1 1>&2 2>&3)
+  case "$OPTION" in
+    1) cleanup ;;
+    2) clean_system ;;
+    3) return ;;
+  esac
+}
+
+# --- Main Menu ---
+function main_menu() {
+  while true; do
+    CHOICE=$(whiptail --title "Deano's Ubuntu 24.04 Control Panel" --menu "Main Menu:" 20 70 10 \
+      "1" "System Setup" \
+      "2" "Backup Options" \
+      "3" "Restore System" \
+      "4" "Security & Privacy" \
+      "5" "Maintenance & Cleanup" \
+      "6" "Exit" \
+      3>&1 1>&2 2>&3)
+    case "$CHOICE" in
+      1) setup_menu ;;
+      2) backup_menu ;;
+      3) restore_backup ;;
+      4) security_menu ;;
+      5) maintenance_menu ;;
+      6) clear; exit ;;
+      *) info "Invalid option." ;;
+    esac
+  done
+}
+
+# Start main menu
+main_menu
