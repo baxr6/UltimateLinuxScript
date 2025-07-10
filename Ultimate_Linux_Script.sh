@@ -517,13 +517,13 @@ function fullBackup() {
     } | tee -a "$LOGFILE"
 
     # Create required folders
-    sudo mkdir -p "$SERVERBACKUPFOLDER/full" "$SERVERBACKUPFOLDER/incremental"
-    sudo touch "$SERVERBACKUPFOLDER/incremental/lastran.txt"
+    mkdir -p "$SERVERBACKUPFOLDER/full" "$SERVERBACKUPFOLDER/incremental"
+    touch "$SERVERBACKUPFOLDER/incremental/lastran.txt"
 
     # Create timestamped backup directory
     local BDIR=$(date +"%Y%m%d_%H%M")
     local TARGETDIR="$SERVERBACKUPFOLDER/full/$BDIR"
-    sudo mkdir -p "$TARGETDIR"
+    mkdir -p "$TARGETDIR"
     
     # Create restore instructions
     cat > "$TARGETDIR/restore.txt" << EOF
