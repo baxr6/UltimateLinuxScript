@@ -2,6 +2,19 @@
 
 A robust and interactive Bash script for setting up and maintaining Ubuntu 24.04 systems. Includes full and incremental backup options, system tweaks, developer tool installation, GNOME settings, and more — all driven by a terminal UI using `whiptail`.
 
+🚀 Getting Started
+
+    Download the Script:
+
+    You can download the script directly using curl or wget:
+
+    curl -O https://raw.githubusercontent.com/baxr6/UltimateLinuxScript/main/Ultimate_Linux_Script.sh
+    chmod +x Ultimate_Linux_Script.sh
+    ./Ultimate_Linux_Script.sh
+
+    Run the Script:
+
+    Execute the script to start the interactive setup and maintenance process.
 ---
 
 ## 📦 Features
