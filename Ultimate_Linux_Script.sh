@@ -313,8 +313,8 @@ function clean_system() {
     # Clean package cache
     sudo apt clean
     
-    # Clean system logs (keep last 7 days)
-    sudo journalctl --vacuum-time=7d
+    # Clean system logs (keep last 3 days)
+    sudo journalctl --vacuum-time=3d
     
     # Clean thumbnail cache
     rm -rf ~/.cache/thumbnails/*
@@ -517,13 +517,13 @@ function fullBackup() {
     } | tee -a "$LOGFILE"
 
     # Create required folders
-    mkdir -p "$SERVERBACKUPFOLDER/full" "$SERVERBACKUPFOLDER/incremental"
-    touch "$SERVERBACKUPFOLDER/incremental/lastran.txt"
+    sudo mkdir -p "$SERVERBACKUPFOLDER/full" "$SERVERBACKUPFOLDER/incremental"
+    sudo touch "$SERVERBACKUPFOLDER/incremental/lastran.txt"
 
     # Create timestamped backup directory
     local BDIR=$(date +"%Y%m%d_%H%M")
     local TARGETDIR="$SERVERBACKUPFOLDER/full/$BDIR"
-    mkdir -p "$TARGETDIR"
+    sudo mkdir -p "$TARGETDIR"
     
     # Create restore instructions
     cat > "$TARGETDIR/restore.txt" << EOF
