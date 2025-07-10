@@ -24,6 +24,39 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOG_DIR/script.log"
 }
 
+ensure_secure_dir() {
+  local target_dir="$1"
+  local dir_owner="${2:-$USER}"  # Optional second arg: owner, defaults to current user
+
+  # Check if directory exists
+  if [ ! -d "$target_dir" ]; then
+    echo "Creating directory: $target_dir"
+    mkdir -p "$target_dir" || {
+      echo "❌ Failed to create directory: $target_dir"
+      return 1
+    }
+  fi
+
+  # Check write permission
+  if [ ! -w "$target_dir" ]; then
+    echo "❌ No write permission for: $target_dir"
+    return 1
+  fi
+
+  # Set secure permissions and ownership
+  chmod 700 "$target_dir"
+  chown "$dir_owner":"$dir_owner" "$target_dir" 2>/dev/null || true
+
+  echo "✅ Directory ready: $target_dir"
+  return 0
+}
+# Ensure main backup folder
+ensure_secure_dir "$SERVERBACKUPFOLDER" || exit 1
+
+# Ensure subfolders
+ensure_secure_dir "$SERVERBACKUPFOLDER/full" || exit 1
+ensure_secure_dir "$SERVERBACKUPFOLDER/incremental" || exit 1
+
 # Check if running as root (for certain operations)
 check_root() {
     if [[ $EUID -eq 0 ]]; then
@@ -37,6 +70,11 @@ if ! command -v whiptail &> /dev/null; then
     log "INFO" "Installing whiptail..."
     sudo apt install -y whiptail
 fi
+
+
+
+# Create marker file
+touch "$SERVERBACKUPFOLDER/incremental/lastran.txt"
 
 # --- Info ---
 function info() {
