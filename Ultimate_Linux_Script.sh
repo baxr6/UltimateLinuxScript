@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Set restrictive umask for all created files
+umask 077
+
 set -euo pipefail
 trap "echo 'Script interrupted'; exit 1" INT TERM
 
@@ -14,27 +17,58 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="/var/log/backup-script"
 ### Backup CONFIG END ###
 
-# Create log directory if it doesn't exist
-sudo mkdir -p "$LOG_DIR"
+# Security: Ensure script is not world-writable/readable
+if [ -w "$0" ] && [ $(stat -c %a "$0") -gt 755 ]; then
+    echo "Security warning: Script is writable by others."
+    chmod 700 "$0"
+fi
 
 # Logging function
 log() {
     local level="$1"
     shift
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOG_DIR/script.log"
+    chmod 600 "$LOG_DIR/script.log" 2>/dev/null || true
 }
 
+# Sudo logging wrapper
+sudo_logged() {
+    log "SUDO" "sudo $*"
+    sudo "$@"
+}
+
+# Create log directory if it doesn't exist
+sudo_logged mkdir -p "$LOG_DIR"
+sudo_logged chmod 700 "$LOG_DIR"
+
+if ! command -v whiptail &> /dev/null; then
+    log "INFO" "Installing whiptail..."
+    if ! sudo_logged apt install -y whiptail 2>&1 | tee -a "$LOG_DIR/script.log"; then
+        error "Failed to install whiptail. Check the log for details."
+        exit 1
+    fi
+fi
+
+# --- Secure ensure_secure_dir ---
 ensure_secure_dir() {
   local target_dir="$1"
   local dir_owner="${2:-$USER}"  # Optional second arg: owner, defaults to current user
 
+  # Input validation: only allow absolute paths, no ..
+  if [[ ! "$target_dir" =~ ^/ ]] || [[ "$target_dir" == *..* ]]; then
+    echo "❌ Invalid directory path: $target_dir"
+    return 1
+  fi
+
   # Check if directory exists
   if [ ! -d "$target_dir" ]; then
     echo "Creating directory: $target_dir"
-    mkdir -p "$target_dir" || {
+    sudo_logged mkdir -p "$target_dir" || {
       echo "❌ Failed to create directory: $target_dir"
       return 1
     }
+    sudo_logged chmod 700 "$target_dir"
+    sudo_logged chown "$dir_owner":"$dir_owner" "$target_dir" 2>/dev/null || true
   fi
 
   # Check write permission
@@ -43,13 +77,13 @@ ensure_secure_dir() {
     return 1
   fi
 
-  # Set secure permissions and ownership
-  chmod 700 "$target_dir"
-  chown "$dir_owner":"$dir_owner" "$target_dir" 2>/dev/null || true
+  sudo_logged chmod 700 "$target_dir"
+  sudo_logged chown "$dir_owner":"$dir_owner" "$target_dir" 2>/dev/null || true
 
   echo "✅ Directory ready: $target_dir"
   return 0
 }
+
 # Ensure main backup folder
 ensure_secure_dir "$SERVERBACKUPFOLDER" || exit 1
 
@@ -64,13 +98,6 @@ check_root() {
         exit 1
     fi
 }
-
-# Install whiptail if not available
-if ! command -v whiptail &> /dev/null; then
-    log "INFO" "Installing whiptail..."
-    sudo apt install -y whiptail
-fi
-
 
 
 # Create marker file
@@ -212,7 +239,7 @@ function system_check() {
     fi
     
     # Check for broken packages
-    if ! sudo apt -f install --dry-run &>/dev/null; then
+    if ! sudo_logged apt -f install --dry-run &>/dev/null; then
         error "System has broken packages. Fix with: sudo apt -f install"
         return 1
     fi
@@ -232,12 +259,12 @@ function system_check() {
 function update_upgrade() {
     log "INFO" "Starting system update..."
     
-    if ! sudo apt update; then
+    if ! sudo_logged apt update; then
         error "Failed to update package lists"
         return 1
     fi
     
-    if ! sudo apt full-upgrade -y; then
+    if ! sudo_logged apt full-upgrade -y; then
         error "Failed to upgrade packages"
         return 1
     fi
@@ -251,7 +278,7 @@ function install_essentials() {
     
     local essentials=(curl git vim gnome-tweaks build-essential unzip htop tree neofetch)
     
-    if ! sudo apt install -y "${essentials[@]}"; then
+    if ! sudo_logged apt install -y "${essentials[@]}"; then
         error "Failed to install essential packages"
         return 1
     fi
@@ -265,7 +292,7 @@ function install_dev_tools() {
     
     local dev_tools=(python3-pip nodejs npm docker.io docker-compose-v2 code)
     
-    if ! sudo apt install -y "${dev_tools[@]}"; then
+    if ! sudo_logged apt install -y "${dev_tools[@]}"; then
         error "Failed to install developer tools"
         return 1
     fi
@@ -283,7 +310,7 @@ function install_dev_tools() {
 function configure_ufw() {
     log "INFO" "Configuring UFW firewall..."
     
-    if ! sudo apt install -y ufw; then
+    if ! sudo_logged apt install -y ufw; then
         error "Failed to install UFW"
         return 1
     fi
@@ -306,7 +333,7 @@ function configure_ufw() {
 function setup_flatpak() {
     log "INFO" "Setting up Flatpak..."
     
-    if ! sudo apt install -y flatpak gnome-software-plugin-flatpak; then
+    if ! sudo_logged apt install -y flatpak gnome-software-plugin-flatpak; then
         error "Failed to install Flatpak"
         return 1
     fi
@@ -450,6 +477,7 @@ function verify_backup() {
     
     # Generate checksums
     find . -name '*.tar.bz2' -exec sha256sum {} \; > SHA256SUMS.txt
+    chmod 600 SHA256SUMS.txt
     
     # Verify checksums
     if sha256sum -c SHA256SUMS.txt > verify.log 2>&1; then
@@ -464,6 +492,7 @@ function verify_backup() {
         error "Backup verification failed. Check verify.log in $target"
         return 1
     fi
+    chmod 600 verify.log
 }
 
 function pBackup() {
@@ -792,6 +821,12 @@ function restore_backup() {
         3) DIR="$SERVERBACKUPFOLDER/rsync_snapshots" ;;
         *) info "Invalid selection."; return ;;
     esac
+
+    # Input validation: only allow restore from expected backup dirs
+    if [[ ! "$DIR" =~ ^/media/deano/HDD/Backup|^/home/deano/pCloudDrive ]]; then
+        error "Invalid restore directory: $DIR"
+        return 1
+    fi
 
     if [[ ! -d "$DIR" ]]; then
         error "Backup directory not found: $DIR"
